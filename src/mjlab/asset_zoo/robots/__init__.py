@@ -16,3 +16,9 @@ from mjlab.asset_zoo.robots.unitree_go1.go1_constants import (
 from mjlab.asset_zoo.robots.unitree_go1.go1_constants import (
   get_go1_robot_cfg as get_go1_robot_cfg,
 )
+from mjlab.asset_zoo.robots.nasa_valkyrie.valkyrie_constants import (
+  VALKYRIE_ACTION_SCALE as VALKYRIE_ACTION_SCALE,
+)
+from mjlab.asset_zoo.robots.nasa_valkyrie.valkyrie_constants import (
+  get_valkyrie_robot_cfg as get_valkyrie_robot_cfg,
+)

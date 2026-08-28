@@ -1,0 +1,46 @@
+NOTICE
+======
+
+This repository is a fork of mjlab with an added integration of the NASA
+Valkyrie humanoid robot. It bundles material under two separate licenses.
+
+--------------------------------------------------------------------------
+1. mjlab (framework / simulation / training loop)
+--------------------------------------------------------------------------
+Copyright the mjlab authors.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+Upstream: https://github.com/mujocolab/mjlab
+
+The mjlab core is used as-is. Additions in this fork live under
+`src/mjlab/asset_zoo/robots/nasa_valkyrie/` and
+`src/mjlab/tasks/velocity/config/nasa_valkyrie/`, plus a two-line import in
+`src/mjlab/asset_zoo/robots/__init__.py` to register the new robot.
+
+--------------------------------------------------------------------------
+2. NASA Valkyrie robot model (val_description)
+--------------------------------------------------------------------------
+Copyright (c) NASA Johnson Space Center Robotics.
+Original source: https://github.com/NASA-JSC-Robotics/val_description
+Licensed under the NASA Open Source Agreement (NOSA) Version 1.3.
+
+The original NASA copyright is retained. In accordance with NOSA v1.3, this
+NOTICE states that the NASA Valkyrie description has been MODIFIED here for
+use in the MuJoCo / mjlab simulator. Summary of modifications:
+
+  - Converted 75 Collada (.dae) visual meshes to Wavefront OBJ (MuJoCo does
+    not load Collada).
+  - Preprocessed the URDF: removed Gazebo plugin, transmission, and sensor
+    tags; welded the 26 finger joints and the Hokuyo laser joint (fixed),
+    which are not used for locomotion.
+  - Rebuilt a clean MJCF (MuJoCo XML) via mjSpec: added a free-joint floating
+    base at the pelvis, set visual geoms to render-only, enabled feet-only
+    collision geometry, added foot sites and a pelvis IMU site with five
+    sensors, and corrected degenerate sensor-frame inertials.
+  - Added actuators (PD position control) and a crouch-stand keyframe.
+
+These modifications are distributed under the same NOSA v1.3 terms as the
+original. No claim is made to the underlying NASA Valkyrie design; only the
+integration work is the contribution of this fork's author.
+
+The MJCF and meshes under `src/mjlab/asset_zoo/robots/nasa_valkyrie/xmls/`
+are derived from NASA's val_description and remain subject to NOSA v1.3.

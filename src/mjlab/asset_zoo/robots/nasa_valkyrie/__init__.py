@@ -1,0 +1,1 @@
+"""NASA Valkyrie robot asset."""

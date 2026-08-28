@@ -17,3 +17,6 @@ benchmark_results/
 # Documentation outputs.
 **/_build/*
 **/generated/*
+
+# session archives — never publish
+.compact_history/
