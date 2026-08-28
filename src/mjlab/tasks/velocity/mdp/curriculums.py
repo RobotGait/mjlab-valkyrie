@@ -114,3 +114,58 @@ def commands_vel(
     "ang_vel_z_min": torch.tensor(cfg.ranges.ang_vel_z[0]),
     "ang_vel_z_max": torch.tensor(cfg.ranges.ang_vel_z[1]),
   }
+
+
+# Iteration-based terrain curriculum. Raises the terrain LEVEL (= box height /
+# stair height, each row interpolating the sub-terrain's min..max) at a fixed
+# rate per iteration instead of by walked distance. The distance rule never
+# fires for an all-direction, gait-clocked robot: its commands cancel out, net
+# travel is ~0, so it would demote to flat even while walking in place. TERRAIN_
+# RAMP is levels-per-iteration (default 1e-3 = +1 level / 1000 iters). On resume
+# the counter continues from the loaded checkpoint, so the ramp is measured from
+# the first step seen this run (override the offset with TERRAIN_RAMP_ITER0).
+import os as _os_curr  # noqa: E402
+
+_TERRAIN_RAMP = float(_os_curr.environ.get("TERRAIN_RAMP", "1e-3"))
+_TERRAIN_SPI = int(_os_curr.environ.get("STEPS_PER_ITER", "24"))
+_TERRAIN_ITER0 = float(_os_curr.environ.get("TERRAIN_RAMP_ITER0", "0"))
+_TERRAIN_T0: int | None = None
+
+
+def terrain_levels_time(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  command_name: str = "twist",
+  asset_cfg: SceneEntityCfg = _DEFAULT_SCENE_CFG,
+) -> dict[str, torch.Tensor]:
+  del command_name, asset_cfg
+  terrain = env.scene.terrain
+  assert terrain is not None
+  global _TERRAIN_T0
+  csc = env.common_step_counter
+  if _TERRAIN_T0 is None:
+    if csc == 0:
+      terrain.terrain_levels = terrain.terrain_levels.clone()
+      terrain.env_origins = terrain.env_origins.clone()
+      terrain.terrain_levels[env_ids] = 0
+      terrain.env_origins[env_ids] = terrain.terrain_origins[
+        0, terrain.terrain_types[env_ids]
+      ]
+      z = torch.zeros((), device=env.device)
+      return {"mean": z, "max": z, "target": z}
+    _TERRAIN_T0 = csc
+  iters = _TERRAIN_ITER0 + (csc - _TERRAIN_T0) / _TERRAIN_SPI
+  target = min(float(terrain.max_terrain_level - 1), iters * _TERRAIN_RAMP)
+  lvl = int(round(target))
+  terrain.terrain_levels = terrain.terrain_levels.clone()
+  terrain.env_origins = terrain.env_origins.clone()
+  terrain.terrain_levels[env_ids] = lvl
+  terrain.env_origins[env_ids] = terrain.terrain_origins[
+    terrain.terrain_levels[env_ids], terrain.terrain_types[env_ids]
+  ]
+  levels = terrain.terrain_levels.float()
+  return {
+    "mean": torch.mean(levels),
+    "max": torch.max(levels),
+    "target": torch.tensor(target, device=env.device),
+  }

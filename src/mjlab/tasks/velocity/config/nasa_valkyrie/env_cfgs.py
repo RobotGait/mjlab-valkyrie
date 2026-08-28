@@ -89,7 +89,53 @@ def valkyrie_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
-    cfg.scene.terrain.terrain_generator.curriculum = True
+    # Rough terrain: boxes as the MAIN surface (>50% of columns) plus stairs to
+    # climb and a little uniform noise. Difficulty is time-ramped, not
+    # distance-based: a gait-clocked all-direction robot cancels net travel, so
+    # the walked-distance promotion never fires. Start ~flat (level 0) and raise
+    # one level (= +0.5 cm box height / +stair height) every 1000 iterations via
+    # terrain_levels_time (set TERRAIN_RAMP=1e-3 at launch).
+    from mjlab.terrains.primitive_terrains import BoxRandomGridTerrainCfg
+
+    tg = cfg.scene.terrain.terrain_generator
+    tg.curriculum = True
+    tg.num_rows = 11  # levels 0..10 -> box height 1cm..6cm in 0.5cm steps
+    tg.size = (8.0, 8.0)
+    cfg.scene.terrain.max_init_terrain_level = 0  # everyone starts near-flat
+
+    subs = tg.sub_terrains
+    # Box grid = main terrain. grid_height interpolates HMIN..HMAX across levels:
+    # level 0 = +/-1cm, level 10 = +/-6cm (0.5cm per level).
+    subs["boxes"] = BoxRandomGridTerrainCfg(
+      proportion=float(os.environ.get("BOX_PROP", "0.55")),
+      grid_width=float(os.environ.get("BOX_GRID_W", "0.30")),
+      grid_height_range=(
+        float(os.environ.get("BOX_HMIN", "0.01")),
+        float(os.environ.get("BOX_HMAX", "0.06")),
+      ),
+      platform_width=1.5,
+      merge_similar_heights=True,
+    )
+    # Stairs to climb (up + inverted/down), step height grows with level.
+    _sh = float(os.environ.get("STAIR_HMAX", "0.12"))
+    for k in ("pyramid_stairs", "pyramid_stairs_inv"):
+      if k in subs:
+        subs[k].step_height_range = (0.0, _sh)
+        subs[k].proportion = 0.125
+    # A little uniform noise (rough ground) so feet learn to clear unevenness.
+    if "random_rough" in subs:
+      subs["random_rough"].proportion = 0.10
+      subs["random_rough"].noise_range = (0.005, 0.05)
+    if "flat" in subs:
+      subs["flat"].proportion = 0.10
+    # Drop slopes/waves — focus on boxes + stairs.
+    for k in ("hf_pyramid_slope", "hf_pyramid_slope_inv", "wave_terrain"):
+      if k in subs:
+        subs[k].proportion = 0.0
+
+    # Iteration-based difficulty ramp instead of walked-distance promotion.
+    if "terrain_levels" in cfg.curriculum:
+      cfg.curriculum["terrain_levels"].func = mdp.terrain_levels_time
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -194,6 +240,43 @@ def valkyrie_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     params={
       "target_height": float(os.environ.get("GAIT_LIFT_H", "0.10")),
       "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
+    },
+  )
+
+  # L/R mirror: penalize left/right asymmetry of the foot swing (one-sided
+  # high-stepping / roll wobble / a dragging leg). Tracks per-foot swing-height
+  # and swing-speed EMAs and costs the |left-right| gap; anti-phase stepping
+  # itself is untouched. Fades out for lateral/yaw commands (legit asymmetry).
+  cfg.rewards["gait_mirror"] = RewardTermCfg(
+    func=mdp.gait_lr_mirror_cost,
+    weight=float(os.environ.get("GAIT_MIRROR_W", "-0.5")),
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "pairs": ((0, 1),),  # (left_foot, right_foot)
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
+    },
+  )
+
+  # Arm swing: reward natural counter-swing — each shoulder pitch tracks the
+  # negative of the same-side hip pitch, so arms swing anti-phase with the legs
+  # (and anti-phase with each other). Gated to moving commands. Flip
+  # ARM_SWING_GAIN's sign if arms end up co-swinging with the legs.
+  cfg.rewards["arm_swing"] = RewardTermCfg(
+    func=mdp.arm_swing,
+    weight=float(os.environ.get("ARM_SWING_W", "0.4")),
+    params={
+      "gain": float(os.environ.get("ARM_SWING_GAIN", "0.6")),
+      "std": float(os.environ.get("ARM_SWING_STD", "0.5")),
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        joint_names=(
+          "leftShoulderPitch",
+          "rightShoulderPitch",
+          "leftHipPitch",
+          "rightHipPitch",
+        ),
+        preserve_order=True,
+      ),
     },
   )
 

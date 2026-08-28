@@ -464,3 +464,145 @@ class variable_posture:
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
 
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
+
+
+def _duty_of(term) -> torch.Tensor:
+  """Per-env stance fraction of the gait cycle. Broadcasts against phase."""
+  duty = getattr(term, "gait_duty", None)
+  if isinstance(duty, torch.Tensor):
+    return duty.unsqueeze(1)
+  return torch.tensor(0.5)
+
+
+def gait_phase_contact(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str = "twist",
+) -> torch.Tensor:
+  """Reward feet whose contact state matches the commanded gait schedule.
+
+  Per-leg phase = shared clock + per-leg offset; a foot is expected to be in
+  stance while its phase < duty and in swing otherwise. Standing envs (frozen
+  clock, near-zero command) expect all feet planted instead. This is the term
+  that breaks the standing local optimum. POSITIVE weight. The sensor foot
+  order must match the command term's gait_offsets order.
+  """
+  term = env.command_manager.get_term(command_name)
+  phase = term.gait_phase  # type: ignore[attr-defined]  # [B, n]
+  sensor: ContactSensor = env.scene[sensor_name]
+  found = sensor.data.found
+  assert found is not None
+  contact = found > 0
+  expected_stance = phase < _duty_of(term)
+  match = (contact == expected_stance).float().mean(dim=1)
+  cmd = env.command_manager.get_command(command_name)
+  assert cmd is not None
+  moving = (torch.norm(cmd[:, :2], dim=1) + torch.abs(cmd[:, 2])) > 0.1
+  stand_match = contact.float().mean(dim=1)
+  return torch.where(moving, match, stand_match)
+
+
+def gait_phase_swing_height(
+  env: ManagerBasedRlEnv,
+  target_height: float = 0.05,
+  command_name: str = "twist",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Continuous reward for lifting each foot during its scheduled swing window.
+
+  Unlike landing-event rewards, this pays every step of the swing window, so a
+  foot that never leaves the ground earns nothing rather than dodging a
+  penalty. Foot height is the site z above the env origin, capped at
+  target_height. POSITIVE weight. Site order must match gait_offsets order.
+  """
+  term = env.command_manager.get_term(command_name)
+  phase = term.gait_phase  # type: ignore[attr-defined]  # [B, n]
+  swing = (phase >= _duty_of(term)).float()
+  asset: Entity = env.scene[asset_cfg.name]
+  foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+  foot_z = foot_z - env.scene.env_origins[:, 2:3]
+  lift = torch.clamp(foot_z, min=0.0, max=target_height) / target_height
+  return torch.sum(lift * swing, dim=1)
+
+
+class gait_lr_mirror_cost:
+  """Left/right mirror asymmetry cost over per-foot swing EMAs.
+
+  Tracks an EMA of swing-phase (airborne) foot height and horizontal speed per
+  foot and costs the |left - right| gap within each mirror pair, so one-sided
+  high-stepping, a dragging leg or roll wobble is penalized while the anti-phase
+  stepping itself is untouched. Fades out for lateral / yaw commands, where a
+  left/right asymmetric gait is legitimate. NEGATIVE weight.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    n = len(cfg.params["asset_cfg"].site_names)
+    self.ema_h = torch.zeros(env.num_envs, n, device=env.device)
+    self.ema_v = torch.zeros(env.num_envs, n, device=env.device)
+    self.alpha = float(cfg.params.get("alpha", 0.03))
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self.ema_h = self.ema_h.clone()
+    self.ema_v = self.ema_v.clone()
+    self.ema_h[env_ids] = 0.0
+    self.ema_v[env_ids] = 0.0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    pairs: tuple[tuple[int, int], ...],
+    command_name: str = "twist",
+    alpha: float = 0.03,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  ) -> torch.Tensor:
+    del alpha  # Resolved in __init__.
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_z = robot.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    foot_z = foot_z - env.scene.env_origins[:, 2:3]
+    foot_v = torch.norm(robot.data.site_lin_vel_w[:, asset_cfg.site_ids, :2], dim=-1)
+    sensor: ContactSensor = env.scene[sensor_name]
+    found = sensor.data.found
+    assert found is not None
+    swing = (found == 0).float()  # [B, n] airborne = swing
+    self.ema_h = self.ema_h + swing * self.alpha * (foot_z - self.ema_h)
+    self.ema_v = self.ema_v + swing * self.alpha * (foot_v - self.ema_v)
+    asym = torch.zeros(env.num_envs, device=env.device)
+    for a, b in pairs:
+      asym = asym + torch.abs(self.ema_h[:, a] - self.ema_h[:, b])
+      asym = asym + torch.abs(self.ema_v[:, a] - self.ema_v[:, b])
+    cmd = env.command_manager.get_command(command_name)
+    assert cmd is not None
+    moving = (torch.norm(cmd[:, :2], dim=1) + torch.abs(cmd[:, 2])) > 0.1
+    gate = 1.0 - torch.abs(cmd[:, 1]) / 0.3 - torch.abs(cmd[:, 2]) / 0.3
+    return asym * moving.float() * torch.clamp(gate, min=0.0, max=1.0)
+
+
+def arm_swing(
+  env: ManagerBasedRlEnv,
+  command_name: str = "twist",
+  gain: float = 0.6,
+  std: float = 0.5,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward natural arm counter-swing: each shoulder pitch tracks the NEGATIVE
+  of the same-side hip pitch, so the arms swing anti-phase with the legs (and
+  with each other), as in human walking. Ties arm motion directly to leg
+  motion, so it is phase-correct at any cadence and needs no clock. POSITIVE
+  weight, gated to moving commands so standing keeps the arms at rest.
+
+  asset_cfg.joint_ids must be resolved with preserve_order=True in the order
+  (left_shoulder_pitch, right_shoulder_pitch, left_hip_pitch, right_hip_pitch).
+  Flip the sign of ``gain`` if the shoulder/hip pitch conventions co-rotate.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  ids = asset_cfg.joint_ids
+  dq = asset.data.joint_pos[:, ids] - asset.data.default_joint_pos[:, ids]
+  sh_l, sh_r, hip_l, hip_r = dq[:, 0], dq[:, 1], dq[:, 2], dq[:, 3]
+  err = torch.square(sh_l + gain * hip_l) + torch.square(sh_r + gain * hip_r)
+  cmd = env.command_manager.get_command(command_name)
+  assert cmd is not None
+  moving = (torch.norm(cmd[:, :2], dim=1) + torch.abs(cmd[:, 2])) > 0.1
+  return torch.exp(-err / std) * moving.float()

@@ -2,7 +2,8 @@
 
 > **Fork of [mjlab](https://github.com/mujocolab/mjlab) (Apache-2.0).**
 > Added by me: integration of the **NASA Valkyrie (R5)** humanoid + a velocity-tracking
-> training environment + a trained walking policy + a rollout video.
+> training environment, a gait-phase clock + gait/arm-swing reward shaping, a rough-terrain
+> stair-climbing curriculum, and trained walking policies with rollout videos.
 > mjlab itself (the RL framework / sim / training loop) is upstream work, not mine.
 
 ## What I added (my contribution)
@@ -19,20 +20,36 @@ Valkyrie is **not** a robot that ships with mjlab or IsaacLab. I brought it in f
 - **Velocity-tracking tasks** registered as `Mjlab-Velocity-Flat-NASA-Valkyrie` and
   `Mjlab-Velocity-Rough-NASA-Valkyrie` (asset zoo + task config; PD gains and a
   crouch-stand keyframe tuned for Valkyrie).
-- **Trained a walking policy** (PPO, flat terrain) and recorded a rollout.
+- **Gait phase clock.** A heavy humanoid trained with a plain velocity reward sits in the
+  "stand and balance" local optimum and never steps. I added an optional phase clock to the
+  velocity command (a shared phase in `[0,1)` that advances while the command is non-zero,
+  offset per foot to left/right anti-phase), exposed it in the observation, and added a
+  contact-vs-schedule reward. That is what makes it start walking.
+- **Reward shaping.** A left/right mirror cost (penalizes one-sided stepping / roll wobble)
+  and a natural arm counter-swing reward (each shoulder pitch tracks the negative of the
+  same-side hip pitch, so the arms swing anti-phase with the legs).
+- **Rough-terrain stair curriculum.** Terrain that is mostly random boxes (>50% of tiles) plus
+  climbable stairs and a little uniform noise, with an **iteration-based difficulty ramp**:
+  starts near-flat (±1 cm) and raises the box/stair height by one level every ~1000 iterations.
+- **Trained walking policies** (flat + rough) and recorded rollouts.
 
-Files I added:
-- `src/mjlab/asset_zoo/robots/nasa_valkyrie/` — MJCF build script, constants, MJCF + meshes.
+Files I added / touched:
+- `src/mjlab/asset_zoo/robots/nasa_valkyrie/` — MJCF build script, constants, MJCF + meshes,
+  and a headless multi-camera rollout recorder (`record_walk.py`).
 - `src/mjlab/tasks/velocity/config/nasa_valkyrie/` — env + PPO configs; auto-registers on import.
+- `src/mjlab/tasks/velocity/mdp/` — small, self-contained additions to the velocity task MDP:
+  a gait phase clock on the velocity command, the `gait_phase_sincos` observation, the
+  `gait_phase_contact` / `gait_phase_swing_height` / `gait_lr_mirror_cost` / `arm_swing`
+  rewards, and the `terrain_levels_time` iteration-based terrain curriculum.
 
 ## Result
-![Valkyrie walking in mjlab](Videos/valkyrie_walk.mp4)
+https://github.com/RobotGait/mjlab-valkyrie/blob/main/Videos/valkyrie_showcase.mp4
 
-Trained on flat terrain, RTX 5090, `num_envs=4096`, PPO.
-
-<!-- TODO before final publish: swap in the mature-checkpoint clip and fill the numbers below.
-     Current clip is an interim early-training rollout. -->
-<!-- final iter / mean episode length / track-velocity reward / fall-rate / best ckpt -->
+`Videos/valkyrie_showcase.mp4` — the flat policy driven through forward / strafe-left /
+strafe-right / turn-left / turn-right, shown front and side, 720p. Trained on RTX 5090,
+`num_envs=4096`, PPO: velocity tracking climbs to ~1.2 while the fall rate falls to near zero;
+the arms counter-swing and the gait stays left/right symmetric. The rough-terrain / stair
+policy trains from the same setup with the terrain curriculum enabled.
 
 ## Reproduce
 First fetch NASA's public Valkyrie description and build the MJCF:
@@ -45,15 +62,25 @@ uv run python src/mjlab/asset_zoo/robots/nasa_valkyrie/build_mjcf.py
 ```
 Then train / play:
 ```bash
-# train
+# train on flat ground
 WANDB_MODE=offline env -u PYTHONPATH uv run train Mjlab-Velocity-Flat-NASA-Valkyrie \
   --env.scene.num-envs 4096 --agent.max-iterations 15000
-# play / record
-env -u PYTHONPATH uv run play Mjlab-Velocity-Flat-NASA-Valkyrie --video True
+
+# train on rough terrain + stairs (iteration-based difficulty ramp)
+TERRAIN_RAMP=1e-3 WANDB_MODE=offline env -u PYTHONPATH uv run train \
+  Mjlab-Velocity-Rough-NASA-Valkyrie --env.scene.num-envs 4096 --agent.max-iterations 20000
+
+# record a front+side showcase clip (forward / strafe / turn)
+MUJOCO_GL=egl WANDB_MODE=offline env -u PYTHONPATH uv run python \
+  src/mjlab/asset_zoo/robots/nasa_valkyrie/record_walk.py \
+  --ckpt <model.pt> --out showcase.mp4 --showcase --fix-yaw \
+  --azimuth 90 --width 1280 --height 720
 ```
 
 ## Licensing / attribution
-- Framework: **mjlab** — Apache-2.0 (upstream; core unmodified). See `LICENSE`.
+- Framework: **mjlab** — Apache-2.0 (upstream). The RL framework / sim / training loop are
+  unchanged; my only edits to shared files are small, self-contained additions to the velocity
+  task MDP (listed above). See `LICENSE`.
 - Robot model: **NASA Valkyrie `val_description`** — NASA Open Source Agreement (NOSA) v1.3.
   Redistribution + modification are permitted; my modifications are noted and the original
   NASA copyright is retained. See `NOTICE`.

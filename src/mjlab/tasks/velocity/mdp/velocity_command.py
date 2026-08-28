@@ -45,6 +45,14 @@ class UniformVelocityCommand(CommandTerm):
     self.is_world_env = torch.zeros_like(self.is_heading_env)
     self.is_forward_env = torch.zeros_like(self.is_heading_env)
 
+    # Optional gait phase clock (see cfg.gait_freq). A shared phase in [0, 1)
+    # advances while the command is non-zero and is offset per foot to give a
+    # per-leg phase; exposed to the policy and the gait-shaping rewards.
+    self.gait_clock = torch.zeros(self.num_envs, device=self.device)
+    self._gait_offsets = torch.tensor(
+      self.cfg.gait_offsets, dtype=torch.float32, device=self.device
+    )
+
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -56,6 +64,16 @@ class UniformVelocityCommand(CommandTerm):
   @property
   def command(self) -> torch.Tensor:
     return self.vel_command_b
+
+  @property
+  def gait_phase(self) -> torch.Tensor:
+    """Per-leg phase in [0, 1): shared clock + per-leg offset. [B, n_legs]."""
+    return (self.gait_clock.unsqueeze(1) + self._gait_offsets.unsqueeze(0)) % 1.0
+
+  @property
+  def gait_duty(self) -> torch.Tensor:
+    """Stance fraction of the cycle (0.5 = symmetric swing/stance). [B]."""
+    return torch.full_like(self.gait_clock, 0.5)
 
   def _update_metrics(self) -> None:
     max_command_time = self.cfg.resampling_time_range[1]
@@ -81,6 +99,8 @@ class UniformVelocityCommand(CommandTerm):
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
+    if self.cfg.gait_freq > 0.0:
+      self.gait_clock[env_ids] = torch.rand(len(env_ids), device=self.device)
 
     # Randomly assign world-frame envs.
     self.is_world_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_world_envs
@@ -202,6 +222,15 @@ class UniformVelocityCommand(CommandTerm):
     self, dt: float | torch.Tensor, env_ids: torch.Tensor | None = None
   ) -> None:
     super().compute(dt, env_ids)
+    # Advance the gait clock each step while the command is non-zero (a
+    # standing robot keeps a frozen phase, so all feet stay planted).
+    if self.cfg.gait_freq > 0.0:
+      moving = (
+        torch.norm(self.vel_command_b[:, :2], dim=1)
+        + torch.abs(self.vel_command_b[:, 2])
+      ) > 0.1
+      advanced = (self.gait_clock + dt * self.cfg.gait_freq) % 1.0
+      self.gait_clock = torch.where(moving, advanced, self.gait_clock)
     if self._joystick_enabled is not None and self._joystick_enabled.value:
       assert self._joystick_get_env_idx is not None
       idx = self._joystick_get_env_idx()
@@ -298,6 +327,13 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   init_velocity_prob: float = 0.0
   """Probability that an env starts its episode already moving at its sampled
   planar command velocity. Applied on reset only."""
+  gait_freq: float = 0.0
+  """Gait clock frequency in Hz. 0 disables the clock. When > 0 a phase in
+  [0, 1) advances while the command is non-zero (frozen when standing) and is
+  exposed as a per-leg phase for the observation and gait-shaping rewards."""
+  gait_offsets: tuple[float, ...] = (0.0, 0.5)
+  """Per-leg phase offsets added to the clock. Default is a biped in
+  anti-phase (left, right)."""
 
   @dataclass
   class Ranges:
