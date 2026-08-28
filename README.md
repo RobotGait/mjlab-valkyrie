@@ -43,13 +43,18 @@ Files I added / touched:
   rewards, and the `terrain_levels_time` iteration-based terrain curriculum.
 
 ## Result
-https://github.com/RobotGait/mjlab-valkyrie/blob/main/Videos/valkyrie_showcase.mp4
+https://github.com/RobotGait/mjlab-valkyrie/blob/main/Videos/valkyrie_stairs_10cm_perception.mp4
 
-`Videos/valkyrie_showcase.mp4` — the flat policy driven through forward / strafe-left /
-strafe-right / turn-left / turn-right, shown front and side, 720p. Trained on RTX 5090,
-`num_envs=4096`, PPO: velocity tracking climbs to ~1.2 while the fall rate falls to near zero;
-the arms counter-swing and the gait stays left/right symmetric. The rough-terrain / stair
-policy trains from the same setup with the terrain curriculum enabled.
+`Videos/valkyrie_stairs_10cm_perception.mp4` — the perceptive policy climbing a 10 cm
+staircase using the terrain height-scan; the cyan dots are the scan points the robot senses.
+`Videos/valkyrie_boxfield_5cm_perception.mp4` — the same policy walking across a field of
+ankle-height (±5 cm) random boxes.
+
+Trained on RTX 5090, `num_envs=4096`, PPO with the `terrain_levels_time` curriculum. Starting
+from a flat walker, the terrain height-scan is spliced into the network (zero-initialised, so
+day-one behaviour is unchanged) and the terrain difficulty is ramped so the robot learns to
+see and step. A fixed forward-velocity rollout confirms the policy actually tracks the command
+— real translation at ~0.4–0.6 m/s with zero falls — rather than stepping in place.
 
 ## Reproduce
 First fetch NASA's public Valkyrie description and build the MJCF:
