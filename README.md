@@ -63,6 +63,10 @@ see and step. A fixed forward-velocity rollout confirms the policy actually trac
 — real translation at ~0.4–0.6 m/s with zero falls — rather than stepping in place.
 
 ## Reproduce
+Full step-by-step (build → train → verify → record the obstacle course, with exact
+commands, reward weights, and the marching-trap fixes) is in **[REPRODUCE.md](REPRODUCE.md)**.
+Quick start:
+
 First fetch NASA's public Valkyrie description and build the MJCF:
 ```bash
 # NASA val_description (NOSA v1.3) — public, redistribution + modification permitted
