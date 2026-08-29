@@ -43,7 +43,13 @@ Files I added / touched:
   rewards, and the `terrain_levels_time` iteration-based terrain curriculum.
 
 ## Result
-https://github.com/RobotGait/mjlab-valkyrie/blob/main/Videos/valkyrie_stairs_10cm_perception.mp4
+https://github.com/RobotGait/mjlab-valkyrie/blob/main/Videos/valkyrie_obstacle_course.mp4
+
+`Videos/valkyrie_obstacle_course.mp4` — a single trained policy running one continuous
+obstacle course: up a staircase, across the top, down the other side, over a field of
+±10 cm random boxes, then up-and-over a ramp — all from one forward-velocity command.
+The camera tracks the torso, so the traverse is real translation (verified separately with
+a fixed-command rollout), not stepping in place.
 
 `Videos/valkyrie_stairs_10cm_perception.mp4` — the perceptive policy climbing a 10 cm
 staircase using the terrain height-scan; the cyan dots are the scan points the robot senses.
